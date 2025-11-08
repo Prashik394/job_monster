@@ -2,7 +2,7 @@ name: Scheduled Job Monitor
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch: {}
 
 jobs:
@@ -31,19 +31,46 @@ jobs:
         run: |
           python monitor_github.py
 
-      - name: Commit seen_jobs.json if changed
+      - name: Commit seen_jobs.json if changed (safe)
         if: always()
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
+          set -e
+          echo "---- Git debug info ----"
+          git --version
+          git remote -v || true
+          echo "Current branch/ref: $GITHUB_REF"
+          echo "Workspace files:"
+          ls -la || true
+          # configure minimal identity
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}.git
-          git add seen_jobs.json || true
-          if ! git diff --cached --quiet; then
-            git commit -m "Update seen_jobs.json (from workflow run $GITHUB_RUN_ID)"
-            git push origin HEAD:${{ github.ref_name }}
+          # set remote using PAT
+          ORIGIN_URL="https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}.git"
+          git remote set-url origin "$ORIGIN_URL"
+          # Add the file if present
+          if [ -f "seen_jobs.json" ]; then
+            git add seen_jobs.json
           else
-            echo "No changes to seen_jobs.json"
+            echo "seen_jobs.json not present - nothing to commit"
           fi
-
+          # Only commit / push if there are staged changes
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          echo "Committing changes..."
+          git commit -m "Update seen_jobs.json (workflow $GITHUB_RUN_ID)"
+          echo "Pushing to remote..."
+          if git push origin HEAD:${{ github.ref_name }}; then
+            echo "Push succeeded."
+          else
+            echo "Push failed. Possible causes:"
+            echo " - GH_PAT missing/invalid"
+            echo " - token lacks 'public_repo' or 'repo' scope"
+            echo " - branch is protected and disallows pushes"
+            echo "Check repository Settings -> Secrets and Branch protection rules."
+            # do not fail workflow to keep checks running
+            exit 0
+          fi
